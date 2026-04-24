@@ -13,7 +13,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { isSupabaseConfigured } from "./lib/supabase";
+import { isSupabaseConfigured, supabase, type AuthSession } from "./lib/supabase";
 import { paths, subjectMap, totalCourses, totalHours, weeks, type Course } from "./data/roadmap";
 
 const iconMap = { Keyboard, Sigma, Network };
@@ -21,6 +21,11 @@ const progressKey = "summer-roadmap-progress";
 
 function App() {
   const [completed, setCompleted] = useState<Set<string>>(() => new Set());
+  const [session, setSession] = useState<AuthSession>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [authMessage, setAuthMessage] = useState("");
+  const [isSyncing, setIsSyncing] = useState(false);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(progressKey);
@@ -32,6 +37,71 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(progressKey, JSON.stringify([...completed]));
   }, [completed]);
+
+  useEffect(() => {
+    if (!supabase) {
+      return;
+    }
+
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!supabase || !session?.user) {
+      return;
+    }
+
+    const client = supabase;
+
+    const syncProgress = async () => {
+      setIsSyncing(true);
+      setAuthMessage("Syncing progress...");
+
+      const localIds = new Set(readLocalProgress());
+      const { data, error } = await client
+        .from("course_progress")
+        .select("course_id")
+        .eq("user_id", session.user.id);
+
+      if (error) {
+        setAuthMessage(error.message);
+        setIsSyncing(false);
+        return;
+      }
+
+      const cloudIds = new Set((data ?? []).map((row) => row.course_id as string));
+      const merged = new Set([...localIds, ...cloudIds]);
+      setCompleted(merged);
+
+      if (localIds.size > 0) {
+        const rows = [...merged].map((courseId) => ({
+          user_id: session.user.id,
+          course_id: courseId,
+        }));
+        const { error: upsertError } = await client.from("course_progress").upsert(rows);
+        if (upsertError) {
+          setAuthMessage(upsertError.message);
+          setIsSyncing(false);
+          return;
+        }
+      }
+
+      setAuthMessage("Cloud sync is active.");
+      setIsSyncing(false);
+    };
+
+    void syncProgress();
+  }, [session]);
 
   const completedHours = useMemo(() => {
     return weeks.reduce((total, week) => {
@@ -47,16 +117,74 @@ function App() {
   const completedCourses = completed.size;
   const progressPercent = Math.round((completedHours / totalHours) * 100);
 
-  function toggleCourse(course: Course) {
+  async function toggleCourse(course: Course) {
+    const willComplete = !completed.has(course.id);
+
     setCompleted((current) => {
       const next = new Set(current);
-      if (next.has(course.id)) {
-        next.delete(course.id);
-      } else {
+      if (willComplete) {
         next.add(course.id);
+      } else {
+        next.delete(course.id);
       }
       return next;
     });
+
+    if (!supabase || !session?.user) {
+      return;
+    }
+
+    setIsSyncing(true);
+    const result = willComplete
+      ? await supabase.from("course_progress").upsert({
+          user_id: session.user.id,
+          course_id: course.id,
+        })
+      : await supabase
+          .from("course_progress")
+          .delete()
+          .eq("user_id", session.user.id)
+          .eq("course_id", course.id);
+
+    if (result.error) {
+      setAuthMessage(result.error.message);
+    } else {
+      setAuthMessage("Progress saved.");
+    }
+    setIsSyncing(false);
+  }
+
+  async function signIn() {
+    if (!supabase) {
+      setAuthMessage("Add Supabase keys in .env.local to enable sign in.");
+      return;
+    }
+    setIsSyncing(true);
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    setAuthMessage(error ? error.message : "Signed in.");
+    setIsSyncing(false);
+  }
+
+  async function signUp() {
+    if (!supabase) {
+      setAuthMessage("Add Supabase keys in .env.local to enable sign up.");
+      return;
+    }
+    setIsSyncing(true);
+    const { error } = await supabase.auth.signUp({ email, password });
+    setAuthMessage(error ? error.message : "Account created. Check email if confirmation is enabled.");
+    setIsSyncing(false);
+  }
+
+  async function signOut() {
+    if (!supabase) {
+      return;
+    }
+    setIsSyncing(true);
+    await supabase.auth.signOut();
+    setSession(null);
+    setAuthMessage("Signed out. Local progress is still saved on this device.");
+    setIsSyncing(false);
   }
 
   return (
@@ -93,10 +221,47 @@ function App() {
             <span>{completedHours.toFixed(1)} / {totalHours.toFixed(1)} hrs</span>
           </div>
           <p className="sync-note">
-            {isSupabaseConfigured
-              ? "Supabase is configured and ready for cloud sync."
-              : "Local progress works now. Supabase sync is the next backend step."}
+            {getSyncLabel(isSupabaseConfigured, Boolean(session), isSyncing)}
           </p>
+          <div className="auth-panel">
+            {session ? (
+              <>
+                <div>
+                  <span className="auth-label">Signed in</span>
+                  <strong>{session.user.email}</strong>
+                </div>
+                <button className="button auth-button" onClick={signOut} type="button">
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <>
+                <input
+                  autoComplete="email"
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="Email"
+                  type="email"
+                  value={email}
+                />
+                <input
+                  autoComplete="current-password"
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="Password"
+                  type="password"
+                  value={password}
+                />
+                <div className="auth-actions">
+                  <button className="button button--primary auth-button" onClick={signIn} type="button">
+                    Sign in
+                  </button>
+                  <button className="button auth-button" onClick={signUp} type="button">
+                    Sign up
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+          {authMessage && <p className="auth-message">{authMessage}</p>}
         </div>
       </section>
 
@@ -194,17 +359,35 @@ function App() {
           <span>// Next backend step</span>
           <h2>Connect Supabase after the UI is approved</h2>
           <p>
-            The app already has local progress tracking. The next pass will add auth, Supabase tables,
-            row-level security, and cloud progress sync for all devices.
+            Auth and progress sync are wired into the frontend. Add your Supabase keys and run the
+            schema in Supabase to make progress follow you across devices.
           </p>
         </div>
-        <a className="button button--primary" href="https://github.com/new" target="_blank" rel="noreferrer">
+        <a className="button button--primary" href="https://supabase.com/dashboard" target="_blank" rel="noreferrer">
           <Github size={18} />
-          Create GitHub repo
+          Open Supabase
         </a>
       </section>
     </main>
   );
+}
+
+function readLocalProgress() {
+  const stored = window.localStorage.getItem(progressKey);
+  return stored ? (JSON.parse(stored) as string[]) : [];
+}
+
+function getSyncLabel(configured: boolean, signedIn: boolean, syncing: boolean) {
+  if (!configured) {
+    return "Local progress is active. Add Supabase keys to enable cloud sync.";
+  }
+  if (syncing) {
+    return "Syncing with Supabase...";
+  }
+  if (signedIn) {
+    return "Cloud sync is active across devices.";
+  }
+  return "Supabase is configured. Sign in to sync progress across devices.";
 }
 
 function Stat({ icon: Icon, value, label }: { icon: LucideIcon; value: string; label: string }) {

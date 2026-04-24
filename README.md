@@ -7,7 +7,8 @@ React + Vite frontend for the summer roadmap project.
 - Kraken-inspired responsive frontend
 - Week-by-week roadmap dashboard
 - Course completion tracking with local storage
-- Supabase client placeholder for the backend phase
+- Supabase email/password auth wiring
+- Supabase cloud progress sync
 - GitHub Pages deploy script
 
 ## Run locally
@@ -25,14 +26,21 @@ npm run build
 
 ## Supabase setup
 
-Create a `.env.local` file:
+1. Create a Supabase project at https://supabase.com/dashboard
+2. Go to Project Settings > API
+3. Copy the Project URL and anon public key
+4. Create a `.env.local` file:
 
 ```bash
 VITE_SUPABASE_URL=your_supabase_project_url
 VITE_SUPABASE_ANON_KEY=your_supabase_anon_key
 ```
 
-The frontend currently stores progress locally. The next backend step is to add Supabase auth, progress tables, notes tables, and row-level security.
+5. Open SQL Editor in Supabase
+6. Run the SQL in `supabase/schema.sql`
+7. Go to Authentication > Providers and make sure Email is enabled
+
+The app uses local storage when Supabase is not configured. After you add the keys and run the schema, signing in will sync completed courses across devices.
 
 ## GitHub Pages deploy
 
